@@ -94,5 +94,5 @@ To access Bluetooth hardware, this app requires the following permissions (handl
 
 ---
 
-**Author:** [Your Name]
+**Author:** Sharanprakash R Kasbag
 **License:** MIT
