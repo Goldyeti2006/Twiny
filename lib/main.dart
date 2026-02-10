@@ -6,6 +6,9 @@ void main() {
   runApp(const MaterialApp(home: ScanScreen()));
 }
 
+// ------------------------------------------------------------------
+// SCREEN 1: SCAN SCREEN (Finds the ESP32)
+// ------------------------------------------------------------------
 class ScanScreen extends StatefulWidget {
   const ScanScreen({super.key});
 
@@ -14,18 +17,18 @@ class ScanScreen extends StatefulWidget {
 }
 
 class _ScanScreenState extends State<ScanScreen> {
-  // This list holds the devices we find
   List<ScanResult> _scanResults = [];
   bool _isScanning = false;
+
+  // This UUID MUST match the 'SERVICE_UUID' in your ESP32 code
+  final String _targetServiceUUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
 
   @override
   void initState() {
     super.initState();
-    // ask for permissions as soon as the app starts
     _checkPermissions();
   }
 
-  // 1. Request Android Permissions
   Future<void> _checkPermissions() async {
     await [
       Permission.location,
@@ -34,29 +37,32 @@ class _ScanScreenState extends State<ScanScreen> {
     ].request();
   }
 
-  // 2. Start Scanning for Devices
   void startScan() {
-    // Clear the old list
     setState(() {
       _scanResults.clear();
       _isScanning = true;
     });
 
-    // Start listening to the stream of scan results
-    FlutterBluePlus.startScan(timeout: const Duration(seconds: 5));
+    // Start scanning specifically for our Evil Twin's Service UUID
+    FlutterBluePlus.startScan(
+        withServices: [Guid(_targetServiceUUID)],
+        timeout: const Duration(seconds: 10)
+    );
 
-    // Update the UI whenever a new device is found
     FlutterBluePlus.scanResults.listen((results) {
-      setState(() {
-        _scanResults = results;
-      });
+      if(mounted) {
+        setState(() {
+          _scanResults = results;
+        });
+      }
     });
 
-    // Stop the loading spinner after 5 seconds
-    Future.delayed(const Duration(seconds: 5), () {
-      setState(() {
-        _isScanning = false;
-      });
+    Future.delayed(const Duration(seconds: 10), () {
+      if (mounted) {
+        setState(() {
+          _isScanning = false;
+        });
+      }
     });
   }
 
@@ -70,7 +76,6 @@ class _ScanScreenState extends State<ScanScreen> {
       ),
       body: Column(
         children: [
-          // The "Scan" Button
           Padding(
             padding: const EdgeInsets.all(20.0),
             child: ElevatedButton.icon(
@@ -87,7 +92,6 @@ class _ScanScreenState extends State<ScanScreen> {
             ),
           ),
 
-          // The List of Found Devices
           Expanded(
             child: ListView.separated(
               itemCount: _scanResults.length,
@@ -96,25 +100,144 @@ class _ScanScreenState extends State<ScanScreen> {
                 final result = _scanResults[index];
                 final device = result.device;
                 final name = device.platformName.isNotEmpty ? device.platformName : "Unknown Device";
-                final id = device.remoteId.toString();
                 final rssi = result.rssi;
 
                 return ListTile(
                   leading: const Icon(Icons.bluetooth),
                   title: Text(name, style: const TextStyle(fontWeight: FontWeight.bold)),
-                  subtitle: Text(id),
+                  subtitle: Text(device.remoteId.toString()),
                   trailing: Text("$rssi dBm"),
-                  // Highlight our specific ESP32
-                  tileColor: name == "ESP32_Control" ? Colors.green.withOpacity(0.1) : null,
+                  tileColor: Colors.blue.withOpacity(0.05),
+
+                  // --- HERE IS THE ONTAP SECTION ---
                   onTap: () {
-                    print("Tapped on $name");
-                    // Next Module: We will add connection logic here
+                    // Stop scanning to save battery/bandwidth
+                    FlutterBluePlus.stopScan();
+
+                    // Navigate to the Control Screen
+                    Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (context) => ControlScreen(device: device),
+                      ),
+                    );
                   },
+                  // ---------------------------------
                 );
               },
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+// ------------------------------------------------------------------
+// SCREEN 2: CONTROL SCREEN (Sends Commands)
+// ------------------------------------------------------------------
+class ControlScreen extends StatefulWidget {
+  final BluetoothDevice device;
+
+  const ControlScreen({super.key, required this.device});
+
+  @override
+  State<ControlScreen> createState() => _ControlScreenState();
+}
+
+class _ControlScreenState extends State<ControlScreen> {
+  // These UUIDs must match your ESP32 code exactly
+  final String serviceUUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
+  final String commandUUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
+
+  BluetoothCharacteristic? commandCharacteristic;
+  bool isConnected = false;
+  String statusText = "Connecting...";
+
+  @override
+  void initState() {
+    super.initState();
+    connectToDevice();
+  }
+
+  Future<void> connectToDevice() async {
+    try {
+      await widget.device.connect();
+      setState(() => statusText = "Discovering Services...");
+
+      List<BluetoothService> services = await widget.device.discoverServices();
+
+      var evilTwinService = services.firstWhere(
+            (s) => s.uuid.toString() == serviceUUID,
+        orElse: () => throw Exception("Service not found"),
+      );
+
+      commandCharacteristic = evilTwinService.characteristics.firstWhere(
+            (c) => c.uuid.toString() == commandUUID,
+        orElse: () => throw Exception("Command Char not found"),
+      );
+
+      setState(() {
+        isConnected = true;
+        statusText = "Connected & Ready";
+      });
+
+    } catch (e) {
+      setState(() => statusText = "Error: $e");
+    }
+  }
+
+  Future<void> sendCommand(String cmd) async {
+    if (commandCharacteristic == null) return;
+    await commandCharacteristic!.write(cmd.codeUnits);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text("Sent command: $cmd")),
+    );
+  }
+
+  @override
+  void dispose() {
+    widget.device.disconnect();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text(widget.device.platformName)),
+      body: Center(
+        child: !isConnected
+            ? Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const CircularProgressIndicator(),
+            const SizedBox(height: 20),
+            Text(statusText),
+          ],
+        )
+            : Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text("Status: $statusText", style: const TextStyle(fontSize: 18)),
+            const SizedBox(height: 40),
+            ElevatedButton(
+              onPressed: () => sendCommand("START"),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.blue,
+                padding: const EdgeInsets.symmetric(horizontal: 50, vertical: 20),
+              ),
+              child: const Text("START ATTACK", style: TextStyle(color: Colors.white, fontSize: 18)),
+            ),
+            const SizedBox(height: 20),
+            ElevatedButton(
+              onPressed: () => sendCommand("STOP"),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.green,
+                padding: const EdgeInsets.symmetric(horizontal: 50, vertical: 20),
+              ),
+              child: const Text("STOP ATTACK", style: TextStyle(color: Colors.white, fontSize: 18)),
+            ),
+          ],
+        ),
       ),
     );
   }
